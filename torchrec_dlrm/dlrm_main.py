@@ -9,6 +9,7 @@ import argparse
 import itertools
 import os
 import sys
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import cast, Iterator, List, Optional, Tuple
@@ -345,8 +346,8 @@ def _evaluate(
         itertools.islice(next_iterator, TRAIN_PIPELINE_STAGES - 1),
     )
     auroc = metrics.AUROC(compute_on_step=False).to(device)
-    accuracy = metrics.Accuracy(compute_on_step=False).to(device)
-
+    # accuracy = metrics.Accuracy(compute_on_step=False).to(device)
+    start_time = time.perf_counter()
     with torch.no_grad():
         pbar = tqdm(iter(int, 1), desc=f"Evaluating {stage} set", disable=False)
         while True:
@@ -354,20 +355,22 @@ def _evaluate(
                 _loss, logits, labels = train_pipeline.progress(combined_iterator)
                 preds = torch.sigmoid(logits)
                 auroc(preds, labels)
-                accuracy(preds, labels)
+                # accuracy(preds, labels)
                 if dist.get_rank() == 0:
                     pbar.update(1)
             except StopIteration:
                 break
     auroc_result = auroc.compute().item()
-    accuracy_result = accuracy.compute().item()
+    # accuracy_result = accuracy.compute().item()
+    end_time = time.perf_counter()
     num_samples = torch.tensor(sum(map(len, auroc.target)), device=device)
     dist.reduce(num_samples, 0, op=dist.ReduceOp.SUM)
     if dist.get_rank() == 0:
         print(f"AUROC over {stage} set: {auroc_result}.")
-        print(f"Accuracy over {stage} set: {accuracy_result}.")
+        # print(f"Accuracy over {stage} set: {accuracy_result}.")
         print(f"Number of {stage} samples: {num_samples}")
-    return auroc_result, accuracy_result
+        print(f"Throughput of {stage} [samples/sec]: {num_samples / (end_time - start_time):.2f}")
+    return auroc_result, 0.
 
 
 def _train(
@@ -449,6 +452,7 @@ def _train(
     is_rank_zero = dist.get_rank() == 0
     if is_rank_zero:
         pbar = tqdm(iter(int, 1), desc=f"Epoch {epoch}", disable=False)
+    start_time = time.perf_counter()
     for it in itertools.count():
         try:
             if is_rank_zero:
@@ -490,8 +494,10 @@ def _train(
                 )
                 train_pipeline._model.train()
         except StopIteration:
+            end_time = time.perf_counter()
             if is_rank_zero:
                 print("Total number of iterations:", it)
+                print(f"Throughput of train [samples/sec]: {(batch_size * it) / (end_time - start_time):.2f}")
             break
 
 
